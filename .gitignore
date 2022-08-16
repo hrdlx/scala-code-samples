@@ -1,0 +1,12 @@
+# sbt
+project/project/
+project/target/
+target/
+
+# bloop and metals
+.bloop
+.bsp
+
+# metals
+project/metals.sbt
+.metals
