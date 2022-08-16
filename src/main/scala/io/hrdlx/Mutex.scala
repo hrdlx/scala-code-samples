@@ -3,6 +3,10 @@ package io.hrdlx
 import cats.effect.IO
 import scala.collection.immutable.Queue
 import cats.effect.kernel.Deferred
+import cats.effect.IOApp
+import cats.syntax.parallel._
+import cats.effect.std.Random
+import cats.effect.implicits._
 
 trait Mutex {
   def acquire: IO[Unit]
@@ -38,4 +42,19 @@ object Mutex {
           }.flatten
       }
     }
+}
+
+
+object MutexExample extends IOApp.Simple {
+  override def run: IO[Unit] = Mutex.create.flatMap{mutex => 
+    (1 to 10).toList.parTraverse(n => for {
+      _ <- IO.println(s"[$n task] initialized")
+      _ <- mutex.acquire
+      _ <- IO.println(s"[$n task] started.")
+      random <- Random.scalaUtilRandom[IO]
+      result <- random.nextIntBounded(100)
+      _ <- IO.println(s"[$n task] finished. result: $result")
+      _ <- mutex.release
+    } yield()).void
+  }
 }
