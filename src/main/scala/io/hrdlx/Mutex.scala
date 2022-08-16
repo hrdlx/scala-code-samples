@@ -8,6 +8,8 @@ import cats.syntax.parallel._
 import cats.effect.std.Random
 import cats.effect.implicits._
 
+import scala.concurrent.duration._
+
 trait Mutex {
   def acquire: IO[Unit]
   def release: IO[Unit]
@@ -22,12 +24,18 @@ object Mutex {
         override def acquire: IO[Unit] = IO
           .deferred[Unit]
           .flatMap(signal =>
-            stateRef.modify {
-              case State(false, _) =>
-                State(true, Queue()) -> IO.unit
-              case State(true, queue) =>
-                State(true, queue :+ signal) -> signal.get
-            }.flatten
+            IO.uncancelable { pool =>
+              stateRef.modify {
+                case State(false, _) =>
+                  State(true, Queue()) -> IO.unit
+                case State(true, queue) =>
+                  State(true, queue :+ signal) -> pool(signal.get)
+                    .onCancel { stateRef.modify {
+                      case State(locked, queue) =>
+                        State(locked, queue.filterNot(_ == signal)) -> release
+                    }.flatten}
+              }.flatten
+            }
           )
 
         override def release: IO[Unit] =
@@ -44,17 +52,39 @@ object Mutex {
     }
 }
 
-
 object MutexExample extends IOApp.Simple {
-  override def run: IO[Unit] = Mutex.create.flatMap{mutex => 
-    (1 to 10).toList.parTraverse(n => for {
-      _ <- IO.println(s"[$n task] initialized")
-      _ <- mutex.acquire
-      _ <- IO.println(s"[$n task] started.")
-      random <- Random.scalaUtilRandom[IO]
-      result <- random.nextIntBounded(100)
-      _ <- IO.println(s"[$n task] finished. result: $result")
-      _ <- mutex.release
-    } yield()).void
+  val mutextTest = Mutex.create.flatMap { mutex =>
+    (1 to 10).toList
+      .parTraverse(n =>
+        for {
+          _ <- IO.println(s"[$n task] initialized")
+          _ <- mutex.acquire
+          _ <- IO.println(s"[$n task] started.")
+          random <- Random.scalaUtilRandom[IO]
+          result <- random.nextIntBounded(100)
+          _ <- IO.println(s"[$n task] finished. result: $result")
+          _ <- mutex.release
+        } yield ()
+      )
+      .void
   }
+
+  def simpleTask(mutex: Mutex, id: String, io: IO[Unit]): IO[Unit] =
+    mutex.acquire >>
+      IO.println(s"[task $id] start") >>
+      io >>
+      IO.println(s"[task $id] end") >>
+      mutex.release
+
+  val cancelationTest = for {
+    mutex <- Mutex.create
+    fb1 <- simpleTask(mutex, "A", IO.sleep(1.second)).start
+    fb2 <- simpleTask(mutex, "B", IO.sleep(1.second) >> IO.canceled).start
+    fb3 <- simpleTask(mutex, "C", IO.sleep(1.second)).start
+    _ <- fb1.join
+    _ <- fb2.join
+    _ <- fb3.join
+  } yield ()
+
+  override def run: IO[Unit] = cancelationTest
 }
